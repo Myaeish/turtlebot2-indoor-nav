@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+import time
+import json
+import math
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Imu
+from marvelmind_ros2_msgs.msg import HedgePosition
+from geometry_msgs.msg import Twist
+
+CALIB_FILE = '/home/uas/yaw_offset.json'
+
+class YawCalibrator(Node):
+    def __init__(self):
+        super().__init__('yaw_calibrator')
+        self.cmd_pub = self.create_publisher(Twist, '/commands/velocity', 10)
+        self.create_subscription(Imu, '/imu/data', self.imu_cb, 10)
+        self.create_subscription(HedgePosition, '/hedgehog_pos', self.hedge_cb, 10)
+
+        self.last_pos = None
+        self.raw_imu_yaw = None
+
+    def hedge_cb(self, msg):
+        # Must match fusion_node exactly (positive x, positive y)
+        self.last_pos = (float(msg.x_m), float(msg.y_m))
+
+    def imu_cb(self, msg):
+        # Must match fusion_node exactly (positive atan2)
+        q = msg.orientation
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.raw_imu_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+def main():
+    rclpy.init()
+    node = YawCalibrator()
+
+    print("Waiting for Marvelmind and IMU readings...")
+    while rclpy.ok() and (node.last_pos is None or node.raw_imu_yaw is None):
+        rclpy.spin_once(node, timeout_sec=0.1)
+
+    print("Ready. Position robot facing a clear forward path (at least 1 meter).")
+    input("Press Enter to drive forward 0.8m and calibrate...")
+
+    # Average start position over 15 samples
+    x_samples, y_samples = [], []
+    for _ in range(15):
+        rclpy.spin_once(node, timeout_sec=0.1)
+        x_samples.append(node.last_pos[0])
+        y_samples.append(node.last_pos[1])
+        time.sleep(0.05)
+
+    x1 = sum(x_samples) / len(x_samples)
+    y1 = sum(y_samples) / len(y_samples)
+    imu_start = node.raw_imu_yaw
+
+    print(f"Start pos: ({x1:.3f}, {y1:.3f}) | IMU raw yaw: {math.degrees(imu_start):.1f}°")
+
+    # Drive forward ~0.8m
+    cmd = Twist()
+    cmd.linear.x = 0.20
+    t_end = time.time() + 4.0
+    while time.time() < t_end and rclpy.ok():
+        node.cmd_pub.publish(cmd)
+        rclpy.spin_once(node, timeout_sec=0.05)
+        time.sleep(0.05)
+
+    node.cmd_pub.publish(Twist())
+    print("Settling for 2 seconds...")
+    time.sleep(2.0)
+
+    # Average end position over 15 samples
+    x_end_samples, y_end_samples = [], []
+    for _ in range(15):
+        rclpy.spin_once(node, timeout_sec=0.1)
+        x_end_samples.append(node.last_pos[0])
+        y_end_samples.append(node.last_pos[1])
+        time.sleep(0.05)
+
+    x2 = sum(x_end_samples) / len(x_end_samples)
+    y2 = sum(y_end_samples) / len(y_end_samples)
+
+    dx = x2 - x1
+    dy = y2 - y1
+    dist = math.hypot(dx, dy)
+
+    if dist < 0.25:
+        print(f"Error: Robot moved only {dist:.2f}m. Run aborted.")
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    # Calculate actual vector traveled in Marvelmind room frame
+    map_heading = math.atan2(dy, dx)
+    offset = math.atan2(math.sin(map_heading - imu_start), math.cos(map_heading - imu_start))
+
+    print("--------------------------------------------------")
+    print(f"Traveled distance:     {dist:.3f} m")
+    print(f"Calculated map yaw:    {math.degrees(map_heading):.2f}°")
+    print(f"Raw IMU reading:       {math.degrees(imu_start):.2f}°")
+    print(f"Computed yaw_offset:   {math.degrees(offset):.2f}° ({offset:.4f} rad)")
+    print("--------------------------------------------------")
+
+    with open(CALIB_FILE, 'w') as f:
+        json.dump({'yaw_offset': offset}, f, indent=2)
+    print(f"Saved offset to {CALIB_FILE}")
+
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

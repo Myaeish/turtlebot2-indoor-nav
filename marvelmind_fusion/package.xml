@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>marvelmind_fusion</name>
+  <version>0.0.1</version>
+  <description>Marvelmind + Kobuki odometry fusion</description>
+  <maintainer email="uas@todo.todo">uas</maintainer>
+  <license>Apache-2.0</license>
+  <depend>rclpy</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>marvelmind_ros2_msgs</depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
